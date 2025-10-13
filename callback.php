@@ -11,8 +11,7 @@ if (isset($_GET['showlog']) && $_GET['showlog'] === '1') {
 }
 
 /** ─────────── CONFIG ─────────── **/
-
-define("PAGE_ACCESS_TOKEN", getenv('EAAQWHFe82JwBPqXPwnybrfSFtJ6jRlHGiZACiEE716bscjnyJZBipfEZCrezAm8OmXACHtV9IvLoMXpXuwKZAo4RJt00Sk0EE1Ba5U3wJwdKMi67lGyw0qbADybhBwnuIWJ9Y85FgRmAbJ2spM5KeWptIeNNt3xY1iWycAITDlVxiYsNJ5M1B0857Wdi1uPFpxnCHAZDZD'));
+define("PAGE_ACCESS_TOKEN", getenv('PAGE_ACCESS_TOKEN'));
 define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv("OPENAI_KEY"));
 
