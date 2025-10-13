@@ -1,5 +1,8 @@
 <?php
 require 'vendor/autoload.php';
+// ===== DEBUG LOGGER =====
+file_put_contents('webhook_debug.log', date('c') . " " . $_SERVER['REQUEST_METHOD'] . " " . ($_SERVER['REQUEST_URI'] ?? '') . "\n", FILE_APPEND);
+file_put_contents('webhook_debug.log', file_get_contents('php://input') . "\n\n", FILE_APPEND);
 
 /** ─────────── CONFIG ─────────── **/
 
