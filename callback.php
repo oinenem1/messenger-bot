@@ -3,6 +3,12 @@ require 'vendor/autoload.php';
 // ===== DEBUG LOGGER =====
 file_put_contents('webhook_debug.log', date('c') . " " . $_SERVER['REQUEST_METHOD'] . " " . ($_SERVER['REQUEST_URI'] ?? '') . "\n", FILE_APPEND);
 file_put_contents('webhook_debug.log', file_get_contents('php://input') . "\n\n", FILE_APPEND);
+// ===== VIEW LOG (temporary) =====
+if (isset($_GET['showlog']) && $_GET['showlog'] === '1') {
+    header('Content-Type: text/plain');
+    echo file_exists('webhook_debug.log') ? file_get_contents('webhook_debug.log') : 'No log yet.';
+    exit;
+}
 
 /** ─────────── CONFIG ─────────── **/
 
