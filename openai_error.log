@@ -1,0 +1,2 @@
+Invalid type for 'messages[0].content[1].image_url': expected an object, but got a string instead.
+Invalid type for 'messages[0].content[1].image_url': expected an object, but got a string instead.
