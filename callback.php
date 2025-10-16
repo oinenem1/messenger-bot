@@ -16,8 +16,8 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv("OPENAI_KEY"));
 
 // Models
-define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT", "gpt-4o-mini");
+define("MODEL_VISION", "gpt-5-reasoning");
+define("MODEL_TEXT", "gpt-4o");
 define("SAVE_IMAGE_PATH", "query_image.jpg");
 
 /** ─────────── HELPER: send to Messenger ─────────── **/
@@ -59,9 +59,15 @@ function getTextResponse($text) {
     $payload = [
         "messages" => [[
             "role" => "system",
-            "content" => "You are a helpful physics and math tutor. The user is going to attach an image of a physics or mathematics problem. Always read the text in the image, restate it clearly, and then solve it step-by-step with full calculations.
-                          Write ONLY plain text. Do NOT use LaTeX, TeX, Markdown math, or code fences. Never write \[, \], \(, \), $$, ^{ }, _{ }, \begin, etc. Format math with ordinary characters: - Matrix: [row 1 [0, 0, 1], row2 [0, 0, 0], row 3[1, 0, 0]] - Powers: x^2, e^(i*pi), 3*10^5 - Fractions: (a+b)/c. Avoid repeating past content and exercises. Never refuse unless it’s explicit unsafe content. If the image is unclear, say what you can read and continue logically."
-        ], [
+            "content" => "You are a careful math/physics tutor.
+When a problem is given (in text or image):
+1) Restate the problem briefly.
+2) Determine symmetry/assumptions (odd/even/period, domain) before computing.
+3) Derive formulas explicitly (show integrals, integration by parts, determinant expansions, etc.).
+4) Keep notation plain text (no LaTeX). Write like: a0 = 2/pi * ∫_0^π f(x) dx.
+5) Finish with a short check (parity check, units, plug a simple value).
+If the image is blurry, say what you can read and proceed logically."
+   ], [
             "role" => "user",
             "content" => $text
         ]],
@@ -80,9 +86,15 @@ function getImageResponse() {
     $payload = [
         "messages" => [[
             "role" => "system",
-            "content" => "You are a helpful physics and math tutor. The user is going to attach an image of a physics or mathematics problem. Always read the text in the image, restate it clearly, and then solve it step-by-step with full calculations.
-                          Write ONLY plain text. Do NOT use LaTeX, TeX, Markdown math, or code fences. Never write \[, \], \(, \), $$, ^{ }, _{ }, \begin, etc. Format math with ordinary characters: - Matrix: [row 1 [0, 0, 1], row2 [0, 0, 0], row 3[1, 0, 0]] - Powers: x^2, e^(i*pi), 3*10^5 - Fractions: (a+b)/c. Avoid repeating past content and exercises. Never refuse unless it’s explicit unsafe content. If the image is unclear, say what you can read and continue logically."
-         ], [
+            "content" => "You are a careful math/physics tutor.
+When a problem is given (in text or image):
+1) Restate the problem briefly.
+2) Determine symmetry/assumptions (odd/even/period, domain) before computing.
+3) Derive formulas explicitly (show integrals, integration by parts, determinant expansions, etc.).
+4) Keep notation plain text (no LaTeX). Write like: a0 = 2/pi * ∫_0^π f(x) dx.
+5) Finish with a short check (parity check, units, plug a simple value).
+If the image is blurry, say what you can read and proceed logically."
+ ], [
             "role" => "user",
             "content" => [
                 ["type" => "text", "text" => "Explain or solve the problem shown in this image."],
@@ -90,7 +102,7 @@ function getImageResponse() {
             ]
         ]],
         "max_tokens" => 1500,
-        "temperature" => 0.2
+        "temperature" => 0.1
     ];
 
     $r = callOpenAI(MODEL_VISION, $payload);
