@@ -18,7 +18,7 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv('OPENAI_KEY'));
 
 define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT", "gpt-4o");
+define("MODEL_TEXT", "gpt-5-reasoning");
 define("MODEL_FALLBACK", "gpt-4o-mini");
 define("SAVE_IMAGE_PATH", "query_image.jpg");
 
