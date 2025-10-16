@@ -120,8 +120,7 @@ If a contradiction is found, correct your own work before output.
 Structure every answer:
 1) Problem: brief restatement.
 2) Symmetry or setup proof.
-3) Work: clear numbered steps.
-4) Final answer: single concise line.
+3) Work: clear numbered steps. Do not skip any steps, show all calculation until you reach the final answer. 
 
 Plain text only. No LaTeX or markdown.
 TXT;
@@ -163,7 +162,7 @@ function getImageResponse() {
                 ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
             ]]
         ],
-        "max_tokens" => 600,
+        "max_tokens" => 1000,
         "temperature" => 0.1
     ];
     $vision = callOpenAI(MODEL_VISION, $vision_payload);
