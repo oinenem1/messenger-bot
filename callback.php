@@ -3,7 +3,9 @@ require 'vendor/autoload.php';
 
 /* ===== DEBUG LOGGER ===== */
 file_put_contents('webhook_debug.log', date('c') . " " . $_SERVER['REQUEST_METHOD'] . " " . ($_SERVER['REQUEST_URI'] ?? '') . "\n", FILE_APPEND);
-file_put_contents('webhook_debug.log', file_get_contents('php://input') . "\n\n", FILE_APPEND);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    file_put_contents('webhook_debug.log', file_get_contents('php://input') . "\n\n", FILE_APPEND);
+}
 
 /* ===== VIEW LOG ===== */
 if (isset($_GET['showlog']) && $_GET['showlog'] === '1') {
@@ -18,9 +20,12 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv('OPENAI_KEY'));
 
 define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT", "gpt-4o");
+define("MODEL_TEXT", "gpt-5-reasoning");
 define("MODEL_FALLBACK", "gpt-4o-mini");
 define("SAVE_IMAGE_PATH", "query_image.jpg");
+
+/* Drop anything older than this many seconds (protects against queued redeliveries) */
+define("MAX_EVENT_AGE_SEC", 120);
 
 /* ─────────── HELPERS ─────────── */
 function sanitize_plaintext($s) {
@@ -70,9 +75,14 @@ function sendMessengerResponse($psid, $text) {
 function callOpenAI($model, $payload) {
     $client = OpenAI::client(OPENAI_KEY);
     try {
-        return $client->chat()->create(array_merge(["model" => $model], $payload));
-    } catch (Exception $e) {
-        file_put_contents("openai_error.log", $e->getMessage() . "\n", FILE_APPEND);
+        $res = $client->chat()->create(array_merge(["model" => $model], $payload));
+        if (is_object($res)) {
+            if (method_exists($res, 'toArray')) $res = $res->toArray();
+            else $res = json_decode(json_encode($res), true);
+        }
+        return $res;
+    } catch (Throwable $e) {
+        file_put_contents("openai_error.log", date('c') . " | " . $e->getMessage() . "\n", FILE_APPEND);
         return null;
     }
 }
@@ -93,8 +103,8 @@ Before claiming symmetry, PROVE it:
 Structure every answer like this:
 1) Problem: restate briefly.
 2) Symmetry check: show f(x) and f(-x) with verdict.
-3) Work: numbered clear steps, with integrals or algebra.
-4) Final answer: one concise line.
+3) Work: numbered clear steps, with integrals or algebra. Do not skip any steps, show the full solution until the final answer.
+
 
 Rules:
 - Equations in plain text, e.g. f(x)=x for 0<=x<=pi; f(x)=-x for -pi<=x<0
@@ -111,7 +121,7 @@ function getTextResponse($text) {
             ["role" => "system", "content" => $SYSTEM_PROMPT],
             ["role" => "user",   "content" => $text]
         ],
-        "max_tokens"  => 700,
+        "max_tokens"  => 1000,
         "temperature" => 0.1,
         "top_p"       => 1
     ];
@@ -123,27 +133,64 @@ function getTextResponse($text) {
 /* ─────────── IMAGE PROCESSING ─────────── */
 function getImageResponse() {
     global $SYSTEM_PROMPT;
-    $b64 = base64_encode(@file_get_contents(SAVE_IMAGE_PATH));
-    if (!$b64) return "I couldn't read the image. Please send it again.";
 
-    $payload = [
-        "messages" => [[
-            "role" => "system",
-            "content" => $SYSTEM_PROMPT
-        ], [
-            "role" => "user",
-            "content" => [
-                ["type" => "text", "text" => "Restate the problem, prove symmetry, then solve it step-by-step as instructed."],
-                ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
+    $img = @file_get_contents(SAVE_IMAGE_PATH);
+    if ($img === false || strlen($img) === 0) {
+        return "I couldn't read the image file. Please send it again.";
+    }
+    $b64 = base64_encode($img);
+    $dataUrl = "data:image/jpeg;base64,{$b64}";
+
+    // Extract problem text
+    $extractPayload = [
+        "messages" => [
+            ["role" => "system", "content" => "Extract ONLY the math/physics problem text from the image as plain text. Do not solve it."],
+            [
+                "role" => "user",
+                "content" => [
+                    ["type" => "text", "text" => "Transcribe the problem text exactly."],
+                    ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
+                ]
             ]
-        ]],
-        "max_tokens"  => 900,
-        "temperature" => 0.1,
-        "top_p"       => 1
+        ],
+        "max_tokens"  => 1000,
+        "temperature" => 0.0
     ];
-    $r = callOpenAI(MODEL_VISION, $payload);
-    $out = $r['choices'][0]['message']['content'] ?? "(No response)";
-    return sanitize_plaintext($out);
+    $ocr = callOpenAI(MODEL_VISION, $extractPayload);
+    $problem = $ocr['choices'][0]['message']['content'] ?? '';
+    $problem = sanitize_plaintext($problem);
+
+    if (strlen($problem) < 15) {
+        $fallback = [
+            "messages" => [
+                ["role" => "system", "content" => $SYSTEM_PROMPT],
+                [
+                    "role" => "user",
+                    "content" => [
+                        ["type" => "text", "text" => "Solve the problem in this image step-by-step."],
+                        ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
+                    ]
+                ]
+            ],
+            "max_tokens"  => 1000,
+            "temperature" => 0.1
+        ];
+        $one = callOpenAI(MODEL_VISION, $fallback);
+        return sanitize_plaintext($one['choices'][0]['message']['content'] ?? "I couldn't process the image.");
+    }
+
+    file_put_contents("vision_debug.log", date('c') . "\n" . $problem . "\n\n", FILE_APPEND);
+
+    $solvePayload = [
+        "messages" => [
+            ["role" => "system", "content" => $SYSTEM_PROMPT],
+            ["role" => "user",   "content" => $problem]
+        ],
+        "max_tokens"  => 900,
+        "temperature" => 0.1
+    ];
+    $sol = callOpenAI(MODEL_TEXT, $solvePayload);
+    return sanitize_plaintext($sol['choices'][0]['message']['content'] ?? "(No response)");
 }
 
 /* ─────────── VERIFY WEBHOOK ─────────── */
@@ -159,29 +206,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-/* ─────────── HANDLE MESSAGES ─────────── */
+/* ─────────── HANDLE MESSAGES (single response + timestamp cutoff) ─────────── */
 $input = json_decode(file_get_contents('php://input'), true);
 if (!$input || !isset($input['entry'])) exit;
 
+$now = time();
+
 foreach ($input['entry'] as $entry) {
     foreach ($entry['messaging'] ?? [] as $event) {
-        if (!empty($event['message']['is_echo'])) continue;
-        $psid = $event['sender']['id'] ?? null;
-        if (!$psid) continue;
+        // Only handle real message events
+        if (empty($event['message'])) continue;
 
-        if (isset($event['message']['mid'])) {
-            static $seen = [];
-            if (isset($seen[$event['message']['mid']])) continue;
-            $seen[$event['message']['mid']] = true;
+        // Ignore messages echoed by the page itself
+        if (!empty($event['message']['is_echo'])) continue;
+
+        // Ignore read/delivery/postbacks/etc.
+        if (!isset($event['sender']['id']) || !isset($event['recipient']['id'])) continue;
+
+        // Timestamp cutoff: drop old queued deliveries
+        $ts_ms = $event['timestamp'] ?? null;
+        if ($ts_ms) {
+            $age = $now - (int) floor($ts_ms / 1000);
+            if ($age > MAX_EVENT_AGE_SEC) {
+                file_put_contents('webhook_debug.log', "Dropped stale event age={$age}s (cutoff ".MAX_EVENT_AGE_SEC.")\n", FILE_APPEND);
+                continue;
+            }
         }
 
-        if (isset($event['message']['text'])) {
+        $psid = $event['sender']['id'];
+
+        // De-dupe by mid and ensure single response per webhook
+        static $handled_once = false;
+        if ($handled_once) break;
+        $handled_once = true;
+
+        static $handled_mids = [];
+        $mid = $event['message']['mid'] ?? uniqid('nomid_', true);
+        if (isset($handled_mids[$mid])) continue;
+        $handled_mids[$mid] = true;
+
+        if (!empty($event['message']['text'])) {
             $msg = trim($event['message']['text']);
             $reply = getTextResponse($msg);
             sendMessengerResponse($psid, $reply);
+            break;
         }
-        elseif (isset($event['message']['attachments'][0]['type']) &&
-                $event['message']['attachments'][0]['type'] === 'image') {
+
+        if (!empty($event['message']['attachments'][0]['type']) &&
+            $event['message']['attachments'][0]['type'] === 'image') {
 
             $url = $event['message']['attachments'][0]['payload']['url'] ?? null;
             if ($url) {
@@ -192,6 +264,7 @@ foreach ($input['entry'] as $entry) {
             } else {
                 sendMessengerResponse($psid, "I received an image but no valid link. Please resend it clearly.");
             }
+            break;
         }
     }
 }
