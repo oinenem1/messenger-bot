@@ -98,8 +98,8 @@ Before claiming symmetry, PROVE it:
 Structure every answer like this:
 1) Problem: restate briefly.
 2) Symmetry check: show f(x) and f(-x) with verdict.
-3) Work: numbered clear steps, with integrals or algebra.
-4) Final answer: one concise line.
+3) Work: numbered clear steps, with integrals or algebra. Do not skip any steps, show until the final answer please.
+
 
 Rules:
 - Equations in plain text, e.g. f(x)=x for 0<=x<=pi; f(x)=-x for -pi<=x<0
@@ -148,7 +148,7 @@ function getImageResponse() {
                 ]
             ]
         ],
-        "max_tokens"  => 500,
+        "max_tokens"  => 1000,
         "temperature" => 0.0
     ];
     $ocr = callOpenAI(MODEL_VISION, $extractPayload);
@@ -181,7 +181,7 @@ function getImageResponse() {
             ["role" => "system", "content" => $SYSTEM_PROMPT],
             ["role" => "user",   "content" => $problem]
         ],
-        "max_tokens"  => 900,
+        "max_tokens"  => 1000,
         "temperature" => 0.1
     ];
     $sol = callOpenAI(MODEL_TEXT, $solvePayload);
