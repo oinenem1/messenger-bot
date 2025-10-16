@@ -18,7 +18,7 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv('OPENAI_KEY'));
 
 define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT", "gpt-5-reasoning");
+define("MODEL_TEXT", "gpt-5"); // reasoning model
 define("MODEL_FALLBACK", "gpt-4o-mini");
 define("SAVE_IMAGE_PATH", "query_image.jpg");
 
@@ -70,9 +70,14 @@ function sendMessengerResponse($psid, $text) {
 function callOpenAI($model, $payload) {
     $client = OpenAI::client(OPENAI_KEY);
     try {
-        return $client->chat()->create(array_merge(["model" => $model], $payload));
-    } catch (Exception $e) {
-        file_put_contents("openai_error.log", $e->getMessage() . "\n", FILE_APPEND);
+        $res = $client->chat()->create(array_merge(["model" => $model], $payload));
+        if (is_object($res)) {
+            if (method_exists($res, 'toArray')) $res = $res->toArray();
+            else $res = json_decode(json_encode($res), true);
+        }
+        return $res;
+    } catch (Throwable $e) {
+        file_put_contents("openai_error.log", date('c') . " | " . $e->getMessage() . "\n", FILE_APPEND);
         return null;
     }
 }
@@ -80,27 +85,24 @@ function callOpenAI($model, $payload) {
 /* ─────────── SYSTEM PROMPT ─────────── */
 $SYSTEM_PROMPT = <<<TXT
 You are a careful math/physics tutor. 
-Output must be PLAIN TEXT (no LaTeX, no markdown fences).
+Output must be PLAIN TEXT (no LaTeX, no markdown).
 
 Before claiming symmetry, PROVE it:
-- Write the function exactly as given (piecewise if needed).
-- Compute f(-x) from the same definition.
+- Write f(x) exactly as given (piecewise if needed).
+- Compute f(-x) from that definition.
 - Compare:
   f(x) = ...
   f(-x) = ...
 - Then state: EVEN (f(-x)=f(x)), ODD (f(-x)=-f(x)), or NEITHER.
 
-Structure every answer like this:
-1) Problem: restate briefly.
-2) Symmetry check: show f(x) and f(-x) with verdict.
-3) Work: numbered clear steps, with integrals or algebra.
+Structure every answer:
+1) Problem: brief restate.
+2) Symmetry check.
+3) Work: step-by-step derivation (integrals, equations, etc.).
 4) Final answer: one concise line.
 
-Rules:
-- Equations in plain text, e.g. f(x)=x for 0<=x<=pi; f(x)=-x for -pi<=x<0
-- No LaTeX commands, no backslashes, no Greek letters—use 'pi' etc.
-- Be concise; do NOT repeat the problem or the conclusion twice.
-- If the image is blurry, say what is unreadable and proceed logically.
+Plain text only: use pi, sqrt, etc. No LaTeX, no \\ symbols.
+Be concise; do not repeat problem or answer twice.
 TXT;
 
 /* ─────────── TEXT PROCESSING ─────────── */
@@ -120,25 +122,29 @@ function getTextResponse($text) {
     return sanitize_plaintext($out);
 }
 
-/* ─────────── IMAGE PROCESSING (2-step: OCR → SOLVE) ─────────── */
+/* ─────────── IMAGE PROCESSING (robust OCR → SOLVE) ─────────── */
 function getImageResponse() {
     global $SYSTEM_PROMPT;
 
-    $b64 = base64_encode(@file_get_contents(SAVE_IMAGE_PATH));
-    if (!$b64) return "I couldn't read the image. Please send it again.";
+    $img = @file_get_contents(SAVE_IMAGE_PATH);
+    if ($img === false || strlen($img) === 0) {
+        return "I couldn't read the image file. Please send it again.";
+    }
+    $b64 = base64_encode($img);
+    $dataUrl = "data:image/jpeg;base64,{$b64}";
 
-    /* Step A: Extract clean problem text from the image (no solving). */
+    // Step A: Extract text
     $extractPayload = [
         "messages" => [
             [
                 "role" => "system",
-                "content" => "Extract the problem statement ONLY from the image as plain text. Do not solve it. No LaTeX, no commentary. If multiple parts exist, include all parts as text."
+                "content" => "Extract ONLY the problem text from the image as plain text. No solving, no commentary."
             ],
             [
                 "role" => "user",
                 "content" => [
-                    ["type" => "text", "text" => "Please transcribe the math/physics problem text exactly."],
-                    ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
+                    ["type" => "text", "text" => "Transcribe the math/physics problem text exactly."],
+                    ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
                 ]
             ]
         ],
@@ -147,16 +153,37 @@ function getImageResponse() {
         "top_p"       => 1
     ];
     $ocr = callOpenAI(MODEL_VISION, $extractPayload);
-    $problem = sanitize_plaintext($ocr['choices'][0]['message']['content'] ?? "");
-
-    if ($problem === "" || stripos($problem, "(No response)") !== false) {
-        return "I couldn't read the text in the image. Please send a clearer photo.";
+    $problem = '';
+    if (is_array($ocr) && !empty($ocr['choices'][0]['message']['content'])) {
+        $problem = sanitize_plaintext($ocr['choices'][0]['message']['content']);
     }
 
-    /* Optional: keep a small log of what was extracted (helps debugging). */
+    if (strlen($problem) < 15) {
+        // fallback one-shot
+        $oneShot = [
+            "messages" => [
+                ["role" => "system", "content" => $SYSTEM_PROMPT],
+                [
+                    "role" => "user",
+                    "content" => [
+                        ["type" => "text", "text" => "Solve this directly from the image following instructions."],
+                        ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
+                    ]
+                ]
+            ],
+            "max_tokens" => 900,
+            "temperature" => 0.1,
+            "top_p" => 1
+        ];
+        $r = callOpenAI(MODEL_VISION, $oneShot);
+        if (is_array($r) && !empty($r['choices'][0]['message']['content']))
+            return sanitize_plaintext($r['choices'][0]['message']['content']);
+        return "I couldn't read the problem. Please send a clearer photo.";
+    }
+
     file_put_contents("vision_debug.log", date('c') . "\n" . $problem . "\n\n", FILE_APPEND);
 
-    /* Step B: Solve the extracted text with the reasoning/text model. */
+    // Step B: Solve with reasoning model
     $solvePayload = [
         "messages" => [
             ["role" => "system", "content" => $SYSTEM_PROMPT],
@@ -166,9 +193,33 @@ function getImageResponse() {
         "temperature" => 0.1,
         "top_p"       => 1
     ];
-    $r = callOpenAI(MODEL_TEXT, $solvePayload);
-    $out = $r['choices'][0]['message']['content'] ?? "(No response)";
-    return sanitize_plaintext($out);
+    $sol = callOpenAI(MODEL_TEXT, $solvePayload);
+    if (is_array($sol) && !empty($sol['choices'][0]['message']['content'])) {
+        return sanitize_plaintext($sol['choices'][0]['message']['content']);
+    }
+
+    // Final fallback
+    $final = [
+        "messages" => [
+            ["role" => "system", "content" => $SYSTEM_PROMPT],
+            [
+                "role" => "user",
+                "content" => [
+                    ["type" => "text", "text" => "If possible, solve directly from the image."],
+                    ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
+                ]
+            ]
+        ],
+        "max_tokens"  => 900,
+        "temperature" => 0.1,
+        "top_p"       => 1
+    ];
+    $last = callOpenAI(MODEL_VISION, $final);
+    if (is_array($last) && !empty($last['choices'][0]['message']['content'])) {
+        return sanitize_plaintext($last['choices'][0]['message']['content']);
+    }
+
+    return "I couldn't process the image right now. Please try again.";
 }
 
 /* ─────────── VERIFY WEBHOOK ─────────── */
