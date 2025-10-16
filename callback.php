@@ -1,7 +1,7 @@
 <?php
 require 'vendor/autoload.php';
 
-/* ===== DEBUG LOGGER (minimal) ===== */
+/* ===== DEBUG LOGGER ===== */
 if (!isset($_GET['showlog'])) {
     file_put_contents('webhook_debug.log', date('c') . " " . $_SERVER['REQUEST_METHOD'] . " " . ($_SERVER['REQUEST_URI'] ?? '') . "\n", FILE_APPEND);
 }
@@ -19,14 +19,13 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv('OPENAI_KEY'));
 
 define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT",   "gpt-4o");
+define("MODEL_REASONING", "gpt-5-reasoning");
 define("MODEL_FALLBACK", "gpt-4o-mini");
-
 define("SAVE_IMAGE_PATH", "query_image.jpg");
-define("MID_CACHE_FILE",  "mids_cache.json");
+define("MID_CACHE_FILE", "mids_cache.json");
 define("MID_CACHE_LIMIT", 200);
 
-/* ─────────── UTIL: Message-ID cache to stop repeats ─────────── */
+/* ─────────── MESSAGE CACHE ─────────── */
 function load_mid_cache() {
     if (!file_exists(MID_CACHE_FILE)) return [];
     $raw = @file_get_contents(MID_CACHE_FILE);
@@ -34,7 +33,6 @@ function load_mid_cache() {
     return is_array($arr) ? $arr : [];
 }
 function save_mid_cache($cache) {
-    // keep last N
     if (count($cache) > MID_CACHE_LIMIT) {
         $cache = array_slice($cache, -MID_CACHE_LIMIT, MID_CACHE_LIMIT, true);
     }
@@ -50,10 +48,9 @@ function mark_mid_seen($mid) {
     save_mid_cache($cache);
 }
 
-/* ─────────── TEXT SANITIZER (keep plain text tidy) ─────────── */
+/* ─────────── HELPERS ─────────── */
 function sanitize_plaintext($s) {
     if (!$s) return $s;
-    // collapse huge whitespace and strip duplicate blank lines
     $s = preg_replace('/[ \t]+/u', ' ', $s);
     $s = preg_replace('/\n{3,}/u', "\n\n", $s);
     return trim($s);
@@ -66,8 +63,6 @@ function chunk_for_messenger($text, $limit = 1800) {
         $out[] = mb_substr($text, $i, $limit, 'UTF-8');
     return $out;
 }
-
-/* ─────────── HELPER: send to Messenger ─────────── */
 function sendMessengerResponse($psid, $text) {
     $chunks = chunk_for_messenger($text, 1800);
     foreach ($chunks as $chunk) {
@@ -79,17 +74,14 @@ function sendMessengerResponse($psid, $text) {
         ];
         $ch = curl_init();
         curl_setopt_array($ch, [
-            CURLOPT_URL            => 'https://graph.facebook.com/v19.0/me/messages?access_token=' . PAGE_ACCESS_TOKEN,
-            CURLOPT_POST           => true,
+            CURLOPT_URL => 'https://graph.facebook.com/v19.0/me/messages?access_token=' . PAGE_ACCESS_TOKEN,
+            CURLOPT_POST => true,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-            CURLOPT_POSTFIELDS     => json_encode($body),
-            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS => json_encode($body),
+            CURLOPT_TIMEOUT => 30,
         ]);
-        $res = curl_exec($ch);
-        if ($res === false) {
-            file_put_contents('webhook_debug.log', "sendMessengerResponse curl_error: ".curl_error($ch)."\n", FILE_APPEND);
-        }
+        curl_exec($ch);
         curl_close($ch);
         usleep(250000);
     }
@@ -101,13 +93,12 @@ function callOpenAI($model, $payload) {
     try {
         return $client->chat()->create(array_merge(["model" => $model], $payload));
     } catch (Exception $e) {
-        file_put_contents("openai_error.log", date('c')." ".$e->getMessage() . "\n", FILE_APPEND);
-        // try fallback once if not already using it
+        file_put_contents("openai_error.log", date('c')." ".$e->getMessage()."\n", FILE_APPEND);
         if ($model !== MODEL_FALLBACK) {
             try {
                 return $client->chat()->create(array_merge(["model" => MODEL_FALLBACK], $payload));
             } catch (Exception $e2) {
-                file_put_contents("openai_error.log", date('c')." Fallback failed: ".$e2->getMessage() . "\n", FILE_APPEND);
+                file_put_contents("openai_error.log", date('c')." Fallback failed: ".$e2->getMessage()."\n", FILE_APPEND);
                 return null;
             }
         }
@@ -115,82 +106,85 @@ function callOpenAI($model, $payload) {
     }
 }
 
-/* ─────────── SYSTEM PROMPT (accuracy + no repeats) ─────────── */
-$SYSTEM_PROMPT = <<<TXT
-You are a careful math/physics tutor.
+/* ─────────── PROMPTS ─────────── */
+$SYSTEM_REASONING = <<<TXT
+You are GPT-5-reasoning, a meticulous physics and mathematics tutor.
+Solve exactly one version of the problem, fully but concisely.
 
-Deliver exactly ONE solution, no alternate versions, no repeats.
+Before giving final answers:
+- For functions: compute f(-x) explicitly and prove even/odd/neither.
+- For matrices: verify trace(A)=sum of eigenvalues, det(A)=product of eigenvalues.
+- For Fourier series: show the correct coefficient integrals; derive them, don’t guess.
+If a contradiction is found, correct your own work before output.
 
-For functions/symmetry:
-- Write f(x) exactly as given (piecewise if needed).
-- Compute f(-x) from the same definition (show both lines).
-- Verdict: EVEN if f(-x)=f(x); ODD if f(-x)=-f(x); else NEITHER.
+Structure every answer:
+1) Problem: brief restatement.
+2) Symmetry or setup proof.
+3) Work: clear numbered steps.
+4) Final answer: single concise line.
 
-For linear algebra (eigenvalues/eigenvectors):
-- Compute characteristic polynomial carefully.
-- Self-check: 
-  • trace(A) must equal sum of eigenvalues,
-  • det(A) must equal product of eigenvalues.
-- If either check fails, re-evaluate and fix before final answer.
-
-For Fourier:
-- Prove symmetry using f(-x) from the definition (not intuition).
-- Show the integral(s) and main steps clearly, then give the coefficients.
-
-Formatting rules:
-- Plain text only (no markdown fences). Short, crisp steps.
-- End with "Final answer: ..." on ONE line.
-- If the image is partly unreadable, say what is unclear and proceed with what is legible.
+Plain text only. No LaTeX or markdown.
 TXT;
 
-/* ─────────── TEXT PROCESSING ─────────── */
+$SYSTEM_VISION = "Read the image and extract the full math/physics problem text exactly, without solving it.";
+
+/* ─────────── TEXT MODE (direct to GPT-5) ─────────── */
 function getTextResponse($text) {
-    global $SYSTEM_PROMPT;
+    global $SYSTEM_REASONING;
     $payload = [
         "messages" => [
-            ["role" => "system", "content" => $SYSTEM_PROMPT],
+            ["role" => "system", "content" => $SYSTEM_REASONING],
             ["role" => "user",   "content" => $text]
         ],
-        "max_tokens"        => 900,
-        "temperature"       => 0.1,
-        "top_p"             => 1,
-        "frequency_penalty" => 0.4,
-        "presence_penalty"  => 0.0
+        "max_tokens" => 1200,
+        "temperature" => 0.1,
+        "top_p" => 1,
+        "frequency_penalty" => 0.4
     ];
-    $r = callOpenAI(MODEL_TEXT, $payload);
-    if (!$r) return "I couldn’t reach the solver right now. Try again in a moment.";
-    $out = $r['choices'][0]['message']['content'] ?? null;
-    return $out ? sanitize_plaintext($out) : "I didn’t get a response from the solver.";
+    $r = callOpenAI(MODEL_REASONING, $payload);
+    if (!$r) return "⚠️ Solver unavailable — please try again.";
+    $out = $r['choices'][0]['message']['content'] ?? '';
+    return sanitize_plaintext($out ?: "No response from reasoning model.");
 }
 
-/* ─────────── IMAGE PROCESSING ─────────── */
+/* ─────────── IMAGE → GPT-5 CHAIN ─────────── */
 function getImageResponse() {
-    global $SYSTEM_PROMPT;
-    $raw = @file_get_contents(SAVE_IMAGE_PATH);
-    if (!$raw) return "I couldn't read the image. Please send it again.";
+    global $SYSTEM_VISION, $SYSTEM_REASONING;
+    if (!file_exists(SAVE_IMAGE_PATH)) return "I couldn’t read the image. Please send it again.";
+    $raw = file_get_contents(SAVE_IMAGE_PATH);
     $b64 = base64_encode($raw);
 
-    $payload = [
-        "messages" => [[
-            "role" => "system",
-            "content" => $SYSTEM_PROMPT
-        ], [
-            "role" => "user",
-            "content" => [
-                ["type" => "text", "text" => "Read the image problem carefully, then solve with the rules above."],
+    // Step 1: OCR/extract problem with GPT-4o
+    $vision_payload = [
+        "messages" => [
+            ["role" => "system", "content" => $SYSTEM_VISION],
+            ["role" => "user", "content" => [
+                ["type" => "text", "text" => "Extract the complete readable problem text from this image:"],
                 ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
-            ]
-        ]],
-        "max_tokens"        => 1100,
-        "temperature"       => 0.1,
-        "top_p"             => 1,
-        "frequency_penalty" => 0.4,
-        "presence_penalty"  => 0.0
+            ]]
+        ],
+        "max_tokens" => 600,
+        "temperature" => 0.1
     ];
-    $r = callOpenAI(MODEL_VISION, $payload);
-    if (!$r) return "I couldn’t reach the vision solver right now. Try again in a moment.";
-    $out = $r['choices'][0]['message']['content'] ?? null;
-    return $out ? sanitize_plaintext($out) : "I didn’t get a response from the vision solver.";
+    $vision = callOpenAI(MODEL_VISION, $vision_payload);
+    $problem_text = trim($vision['choices'][0]['message']['content'] ?? '');
+
+    if (!$problem_text) return "I couldn’t extract text from the image.";
+
+    // Step 2: Solve extracted problem with GPT-5 reasoning
+    $reason_payload = [
+        "messages" => [
+            ["role" => "system", "content" => $SYSTEM_REASONING],
+            ["role" => "user", "content" => $problem_text]
+        ],
+        "max_tokens" => 1200,
+        "temperature" => 0.1,
+        "frequency_penalty" => 0.4
+    ];
+    $solve = callOpenAI(MODEL_REASONING, $reason_payload);
+    $out = trim($solve['choices'][0]['message']['content'] ?? '');
+    if (!$out) return "I read the problem but couldn’t get a response from the solver.";
+    return sanitize_plaintext($out);
 }
 
 /* ─────────── VERIFY WEBHOOK ─────────── */
@@ -206,23 +200,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-/* ─────────── HANDLE MESSAGES (no repeats, one send) ─────────── */
+/* ─────────── HANDLE MESSAGES ─────────── */
 $input = json_decode(file_get_contents('php://input'), true);
 if (!$input || !isset($input['entry'])) { http_response_code(200); exit; }
 
 foreach ($input['entry'] as $entry) {
     foreach ($entry['messaging'] ?? [] as $event) {
-        if (!empty($event['message']['is_echo'])) continue; // skip echoes
+        if (!empty($event['message']['is_echo'])) continue;
 
         $psid = $event['sender']['id'] ?? null;
         if (!$psid) continue;
 
         $mid = $event['message']['mid'] ?? null;
         if ($mid) {
-            if (mid_seen_before($mid)) {
-                // already handled this exact message
-                continue;
-            }
+            if (mid_seen_before($mid)) continue;
             mark_mid_seen($mid);
         }
 
@@ -238,33 +229,16 @@ foreach ($input['entry'] as $entry) {
 
             $url = $event['message']['attachments'][0]['payload']['url'] ?? null;
             if ($url) {
-                // Try to download the image
-                $ok = @file_put_contents(SAVE_IMAGE_PATH, @file_get_contents($url));
-                if ($ok === false) {
-                    // fallback attempt with curl (some hosts require it)
-                    $ch = curl_init($url);
-                    $fp = fopen(SAVE_IMAGE_PATH, 'w');
-                    curl_setopt_array($ch, [
-                        CURLOPT_FILE => $fp,
-                        CURLOPT_FOLLOWLOCATION => true,
-                        CURLOPT_TIMEOUT => 60,
-                    ]);
-                    curl_exec($ch);
-                    curl_close($ch);
-                    fclose($fp);
-                }
+                @file_put_contents(SAVE_IMAGE_PATH, @file_get_contents($url));
                 $reply = getImageResponse();
                 sendMessengerResponse($psid, $reply);
                 @unlink(SAVE_IMAGE_PATH);
             } else {
-                sendMessengerResponse($psid, "I received an image but no valid link. Please resend it clearly.");
+                sendMessengerResponse($psid, "I received an image but no valid link.");
             }
-        }
-        // OTHER
-        elseif (isset($event['postback']['payload'])) {
-            sendMessengerResponse($psid, "Tapped: ".$event['postback']['payload']);
         }
     }
 }
 
 http_response_code(200);
+?>
