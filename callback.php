@@ -16,8 +16,9 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv("OPENAI_KEY"));
 
 // Models
-define("MODEL_VISION", "gpt-5");
+define("MODEL_VISION", "gpt-4o");
 define("MODEL_TEXT", "gpt-4o");
+define("MODEL_FALLBACK", "gpt-4o-mini"); 
 define("SAVE_IMAGE_PATH", "query_image.jpg");
 
 /** ─────────── HELPER: send to Messenger ─────────── **/
@@ -59,11 +60,7 @@ function getTextResponse($text) {
     $payload = [
         "messages" => [[
             "role" => "system",
-            "content" => "You are a careful math/physics tutor.
-When a problem is given (in text or image):
-1) Restate the problem briefly.
-2) Determine symmetry/assumptions (odd/even/period, domain) before computing.
-3) Derive formulas explicitly (show integrals, integration by parts, determinant expansions, etc.).
+            "content" => "You are a careful math/physics tutor. When a problem is given (in text or image): 1) Restate the problem briefly. 2) Determine symmetry/assumptions (odd/even/period, domain) before computing. 3) Derive formulas explicitly (show integrals, integration by parts, determinant expansions, etc.).
 4) Keep notation plain text (no LaTeX). Write like: a0 = 2/pi * ∫_0^π f(x) dx.
 5) Finish with a short check (parity check, units, plug a simple value).
 If the image is blurry, say what you can read and proceed logically."
