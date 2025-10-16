@@ -120,28 +120,53 @@ function getTextResponse($text) {
     return sanitize_plaintext($out);
 }
 
-/* ─────────── IMAGE PROCESSING ─────────── */
+/* ─────────── IMAGE PROCESSING (2-step: OCR → SOLVE) ─────────── */
 function getImageResponse() {
     global $SYSTEM_PROMPT;
+
     $b64 = base64_encode(@file_get_contents(SAVE_IMAGE_PATH));
     if (!$b64) return "I couldn't read the image. Please send it again.";
 
-    $payload = [
-        "messages" => [[
-            "role" => "system",
-            "content" => $SYSTEM_PROMPT
-        ], [
-            "role" => "user",
-            "content" => [
-                ["type" => "text", "text" => "Restate the problem, prove symmetry, then solve it step-by-step as instructed."],
-                ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
+    /* Step A: Extract clean problem text from the image (no solving). */
+    $extractPayload = [
+        "messages" => [
+            [
+                "role" => "system",
+                "content" => "Extract the problem statement ONLY from the image as plain text. Do not solve it. No LaTeX, no commentary. If multiple parts exist, include all parts as text."
+            ],
+            [
+                "role" => "user",
+                "content" => [
+                    ["type" => "text", "text" => "Please transcribe the math/physics problem text exactly."],
+                    ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
+                ]
             ]
-        ]],
+        ],
+        "max_tokens"  => 500,
+        "temperature" => 0.0,
+        "top_p"       => 1
+    ];
+    $ocr = callOpenAI(MODEL_VISION, $extractPayload);
+    $problem = sanitize_plaintext($ocr['choices'][0]['message']['content'] ?? "");
+
+    if ($problem === "" || stripos($problem, "(No response)") !== false) {
+        return "I couldn't read the text in the image. Please send a clearer photo.";
+    }
+
+    /* Optional: keep a small log of what was extracted (helps debugging). */
+    file_put_contents("vision_debug.log", date('c') . "\n" . $problem . "\n\n", FILE_APPEND);
+
+    /* Step B: Solve the extracted text with the reasoning/text model. */
+    $solvePayload = [
+        "messages" => [
+            ["role" => "system", "content" => $SYSTEM_PROMPT],
+            ["role" => "user",   "content" => $problem]
+        ],
         "max_tokens"  => 900,
         "temperature" => 0.1,
         "top_p"       => 1
     ];
-    $r = callOpenAI(MODEL_VISION, $payload);
+    $r = callOpenAI(MODEL_TEXT, $solvePayload);
     $out = $r['choices'][0]['message']['content'] ?? "(No response)";
     return sanitize_plaintext($out);
 }
