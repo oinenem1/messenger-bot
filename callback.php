@@ -18,7 +18,7 @@ define("VERIFY_TOKEN", getenv('VERIFY_TOKEN') ?: 'test');
 define("OPENAI_KEY", getenv('OPENAI_KEY'));
 
 define("MODEL_VISION", "gpt-4o");
-define("MODEL_TEXT", "gpt-5"); // reasoning model
+define("MODEL_TEXT", "gpt-4o");
 define("MODEL_FALLBACK", "gpt-4o-mini");
 define("SAVE_IMAGE_PATH", "query_image.jpg");
 
@@ -85,24 +85,27 @@ function callOpenAI($model, $payload) {
 /* ─────────── SYSTEM PROMPT ─────────── */
 $SYSTEM_PROMPT = <<<TXT
 You are a careful math/physics tutor. 
-Output must be PLAIN TEXT (no LaTeX, no markdown).
+Output must be PLAIN TEXT (no LaTeX, no markdown fences).
 
 Before claiming symmetry, PROVE it:
-- Write f(x) exactly as given (piecewise if needed).
-- Compute f(-x) from that definition.
+- Write the function exactly as given (piecewise if needed).
+- Compute f(-x) from the same definition.
 - Compare:
   f(x) = ...
   f(-x) = ...
 - Then state: EVEN (f(-x)=f(x)), ODD (f(-x)=-f(x)), or NEITHER.
 
-Structure every answer:
-1) Problem: brief restate.
-2) Symmetry check.
-3) Work: step-by-step derivation (integrals, equations, etc.).
+Structure every answer like this:
+1) Problem: restate briefly.
+2) Symmetry check: show f(x) and f(-x) with verdict.
+3) Work: numbered clear steps, with integrals or algebra.
 4) Final answer: one concise line.
 
-Plain text only: use pi, sqrt, etc. No LaTeX, no \\ symbols.
-Be concise; do not repeat problem or answer twice.
+Rules:
+- Equations in plain text, e.g. f(x)=x for 0<=x<=pi; f(x)=-x for -pi<=x<0
+- No LaTeX commands, no backslashes, no Greek letters—use 'pi' etc.
+- Be concise; do NOT repeat the problem or the conclusion twice.
+- If the image is blurry, say what is unreadable and proceed logically.
 TXT;
 
 /* ─────────── TEXT PROCESSING ─────────── */
@@ -122,7 +125,7 @@ function getTextResponse($text) {
     return sanitize_plaintext($out);
 }
 
-/* ─────────── IMAGE PROCESSING (robust OCR → SOLVE) ─────────── */
+/* ─────────── IMAGE PROCESSING ─────────── */
 function getImageResponse() {
     global $SYSTEM_PROMPT;
 
@@ -133,93 +136,56 @@ function getImageResponse() {
     $b64 = base64_encode($img);
     $dataUrl = "data:image/jpeg;base64,{$b64}";
 
-    // Step A: Extract text
+    // Extract problem text
     $extractPayload = [
         "messages" => [
-            [
-                "role" => "system",
-                "content" => "Extract ONLY the problem text from the image as plain text. No solving, no commentary."
-            ],
+            ["role" => "system", "content" => "Extract ONLY the math/physics problem text from the image as plain text. Do not solve it."],
             [
                 "role" => "user",
                 "content" => [
-                    ["type" => "text", "text" => "Transcribe the math/physics problem text exactly."],
+                    ["type" => "text", "text" => "Transcribe the problem text exactly."],
                     ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
                 ]
             ]
         ],
         "max_tokens"  => 500,
-        "temperature" => 0.0,
-        "top_p"       => 1
+        "temperature" => 0.0
     ];
     $ocr = callOpenAI(MODEL_VISION, $extractPayload);
-    $problem = '';
-    if (is_array($ocr) && !empty($ocr['choices'][0]['message']['content'])) {
-        $problem = sanitize_plaintext($ocr['choices'][0]['message']['content']);
-    }
+    $problem = $ocr['choices'][0]['message']['content'] ?? '';
+    $problem = sanitize_plaintext($problem);
 
     if (strlen($problem) < 15) {
-        // fallback one-shot
-        $oneShot = [
+        $fallback = [
             "messages" => [
                 ["role" => "system", "content" => $SYSTEM_PROMPT],
                 [
                     "role" => "user",
                     "content" => [
-                        ["type" => "text", "text" => "Solve this directly from the image following instructions."],
+                        ["type" => "text", "text" => "Solve the problem in this image step-by-step."],
                         ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
                     ]
                 ]
             ],
-            "max_tokens" => 900,
-            "temperature" => 0.1,
-            "top_p" => 1
+            "max_tokens"  => 900,
+            "temperature" => 0.1
         ];
-        $r = callOpenAI(MODEL_VISION, $oneShot);
-        if (is_array($r) && !empty($r['choices'][0]['message']['content']))
-            return sanitize_plaintext($r['choices'][0]['message']['content']);
-        return "I couldn't read the problem. Please send a clearer photo.";
+        $one = callOpenAI(MODEL_VISION, $fallback);
+        return sanitize_plaintext($one['choices'][0]['message']['content'] ?? "I couldn't process the image.");
     }
 
     file_put_contents("vision_debug.log", date('c') . "\n" . $problem . "\n\n", FILE_APPEND);
 
-    // Step B: Solve with reasoning model
     $solvePayload = [
         "messages" => [
             ["role" => "system", "content" => $SYSTEM_PROMPT],
             ["role" => "user",   "content" => $problem]
         ],
         "max_tokens"  => 900,
-        "temperature" => 0.1,
-        "top_p"       => 1
+        "temperature" => 0.1
     ];
     $sol = callOpenAI(MODEL_TEXT, $solvePayload);
-    if (is_array($sol) && !empty($sol['choices'][0]['message']['content'])) {
-        return sanitize_plaintext($sol['choices'][0]['message']['content']);
-    }
-
-    // Final fallback
-    $final = [
-        "messages" => [
-            ["role" => "system", "content" => $SYSTEM_PROMPT],
-            [
-                "role" => "user",
-                "content" => [
-                    ["type" => "text", "text" => "If possible, solve directly from the image."],
-                    ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
-                ]
-            ]
-        ],
-        "max_tokens"  => 900,
-        "temperature" => 0.1,
-        "top_p"       => 1
-    ];
-    $last = callOpenAI(MODEL_VISION, $final);
-    if (is_array($last) && !empty($last['choices'][0]['message']['content'])) {
-        return sanitize_plaintext($last['choices'][0]['message']['content']);
-    }
-
-    return "I couldn't process the image right now. Please try again.";
+    return sanitize_plaintext($sol['choices'][0]['message']['content'] ?? "(No response)");
 }
 
 /* ─────────── VERIFY WEBHOOK ─────────── */
@@ -235,29 +201,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-/* ─────────── HANDLE MESSAGES ─────────── */
+/* ─────────── HANDLE MESSAGES (one response only) ─────────── */
 $input = json_decode(file_get_contents('php://input'), true);
 if (!$input || !isset($input['entry'])) exit;
 
 foreach ($input['entry'] as $entry) {
     foreach ($entry['messaging'] ?? [] as $event) {
         if (!empty($event['message']['is_echo'])) continue;
+
         $psid = $event['sender']['id'] ?? null;
         if (!$psid) continue;
 
-        if (isset($event['message']['mid'])) {
-            static $seen = [];
-            if (isset($seen[$event['message']['mid']])) continue;
-            $seen[$event['message']['mid']] = true;
-        }
+        static $handled_once = false;
+        if ($handled_once) break;
+        $handled_once = true;
 
-        if (isset($event['message']['text'])) {
+        $mid = $event['message']['mid'] ?? uniqid('nomid_', true);
+        static $handled_mids = [];
+        if (isset($handled_mids[$mid])) continue;
+        $handled_mids[$mid] = true;
+
+        if (!empty($event['message']['text'])) {
             $msg = trim($event['message']['text']);
             $reply = getTextResponse($msg);
             sendMessengerResponse($psid, $reply);
+            break;
         }
-        elseif (isset($event['message']['attachments'][0]['type']) &&
-                $event['message']['attachments'][0]['type'] === 'image') {
+
+        if (!empty($event['message']['attachments'][0]['type']) &&
+            $event['message']['attachments'][0]['type'] === 'image') {
 
             $url = $event['message']['attachments'][0]['payload']['url'] ?? null;
             if ($url) {
@@ -268,6 +240,7 @@ foreach ($input['entry'] as $entry) {
             } else {
                 sendMessengerResponse($psid, "I received an image but no valid link. Please resend it clearly.");
             }
+            break;
         }
     }
 }
