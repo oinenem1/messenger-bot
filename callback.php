@@ -70,14 +70,9 @@ function sendMessengerResponse($psid, $text) {
 function callOpenAI($model, $payload) {
     $client = OpenAI::client(OPENAI_KEY);
     try {
-        $res = $client->chat()->create(array_merge(["model" => $model], $payload));
-        if (is_object($res)) {
-            if (method_exists($res, 'toArray')) $res = $res->toArray();
-            else $res = json_decode(json_encode($res), true);
-        }
-        return $res;
-    } catch (Throwable $e) {
-        file_put_contents("openai_error.log", date('c') . " | " . $e->getMessage() . "\n", FILE_APPEND);
+        return $client->chat()->create(array_merge(["model" => $model], $payload));
+    } catch (Exception $e) {
+        file_put_contents("openai_error.log", $e->getMessage() . "\n", FILE_APPEND);
         return null;
     }
 }
@@ -98,8 +93,8 @@ Before claiming symmetry, PROVE it:
 Structure every answer like this:
 1) Problem: restate briefly.
 2) Symmetry check: show f(x) and f(-x) with verdict.
-3) Work: numbered clear steps, with integrals or algebra. Do not skip any steps, show until the final answer please.
-
+3) Work: numbered clear steps, with integrals or algebra.
+4) Final answer: one concise line.
 
 Rules:
 - Equations in plain text, e.g. f(x)=x for 0<=x<=pi; f(x)=-x for -pi<=x<0
@@ -128,64 +123,27 @@ function getTextResponse($text) {
 /* ─────────── IMAGE PROCESSING ─────────── */
 function getImageResponse() {
     global $SYSTEM_PROMPT;
+    $b64 = base64_encode(@file_get_contents(SAVE_IMAGE_PATH));
+    if (!$b64) return "I couldn't read the image. Please send it again.";
 
-    $img = @file_get_contents(SAVE_IMAGE_PATH);
-    if ($img === false || strlen($img) === 0) {
-        return "I couldn't read the image file. Please send it again.";
-    }
-    $b64 = base64_encode($img);
-    $dataUrl = "data:image/jpeg;base64,{$b64}";
-
-    // Extract problem text
-    $extractPayload = [
-        "messages" => [
-            ["role" => "system", "content" => "Extract ONLY the math/physics problem text from the image as plain text. Do not solve it."],
-            [
-                "role" => "user",
-                "content" => [
-                    ["type" => "text", "text" => "Transcribe the problem text exactly."],
-                    ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
-                ]
+    $payload = [
+        "messages" => [[
+            "role" => "system",
+            "content" => $SYSTEM_PROMPT
+        ], [
+            "role" => "user",
+            "content" => [
+                ["type" => "text", "text" => "Restate the problem, prove symmetry, then solve it step-by-step as instructed."],
+                ["type" => "image_url", "image_url" => ["url" => "data:image/jpeg;base64,{$b64}"]]
             ]
-        ],
-        "max_tokens"  => 1000,
-        "temperature" => 0.0
+        ]],
+        "max_tokens"  => 900,
+        "temperature" => 0.1,
+        "top_p"       => 1
     ];
-    $ocr = callOpenAI(MODEL_VISION, $extractPayload);
-    $problem = $ocr['choices'][0]['message']['content'] ?? '';
-    $problem = sanitize_plaintext($problem);
-
-    if (strlen($problem) < 15) {
-        $fallback = [
-            "messages" => [
-                ["role" => "system", "content" => $SYSTEM_PROMPT],
-                [
-                    "role" => "user",
-                    "content" => [
-                        ["type" => "text", "text" => "Solve the problem in this image step-by-step."],
-                        ["type" => "image_url", "image_url" => ["url" => $dataUrl]]
-                    ]
-                ]
-            ],
-            "max_tokens"  => 900,
-            "temperature" => 0.1
-        ];
-        $one = callOpenAI(MODEL_VISION, $fallback);
-        return sanitize_plaintext($one['choices'][0]['message']['content'] ?? "I couldn't process the image.");
-    }
-
-    file_put_contents("vision_debug.log", date('c') . "\n" . $problem . "\n\n", FILE_APPEND);
-
-    $solvePayload = [
-        "messages" => [
-            ["role" => "system", "content" => $SYSTEM_PROMPT],
-            ["role" => "user",   "content" => $problem]
-        ],
-        "max_tokens"  => 1000,
-        "temperature" => 0.1
-    ];
-    $sol = callOpenAI(MODEL_TEXT, $solvePayload);
-    return sanitize_plaintext($sol['choices'][0]['message']['content'] ?? "(No response)");
+    $r = callOpenAI(MODEL_VISION, $payload);
+    $out = $r['choices'][0]['message']['content'] ?? "(No response)";
+    return sanitize_plaintext($out);
 }
 
 /* ─────────── VERIFY WEBHOOK ─────────── */
@@ -201,35 +159,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     exit;
 }
 
-/* ─────────── HANDLE MESSAGES (one response only) ─────────── */
+/* ─────────── HANDLE MESSAGES ─────────── */
 $input = json_decode(file_get_contents('php://input'), true);
 if (!$input || !isset($input['entry'])) exit;
 
 foreach ($input['entry'] as $entry) {
     foreach ($entry['messaging'] ?? [] as $event) {
         if (!empty($event['message']['is_echo'])) continue;
-
         $psid = $event['sender']['id'] ?? null;
         if (!$psid) continue;
 
-        static $handled_once = false;
-        if ($handled_once) break;
-        $handled_once = true;
+        if (isset($event['message']['mid'])) {
+            static $seen = [];
+            if (isset($seen[$event['message']['mid']])) continue;
+            $seen[$event['message']['mid']] = true;
+        }
 
-        $mid = $event['message']['mid'] ?? uniqid('nomid_', true);
-        static $handled_mids = [];
-        if (isset($handled_mids[$mid])) continue;
-        $handled_mids[$mid] = true;
-
-        if (!empty($event['message']['text'])) {
+        if (isset($event['message']['text'])) {
             $msg = trim($event['message']['text']);
             $reply = getTextResponse($msg);
             sendMessengerResponse($psid, $reply);
-            break;
         }
-
-        if (!empty($event['message']['attachments'][0]['type']) &&
-            $event['message']['attachments'][0]['type'] === 'image') {
+        elseif (isset($event['message']['attachments'][0]['type']) &&
+                $event['message']['attachments'][0]['type'] === 'image') {
 
             $url = $event['message']['attachments'][0]['payload']['url'] ?? null;
             if ($url) {
@@ -240,7 +192,6 @@ foreach ($input['entry'] as $entry) {
             } else {
                 sendMessengerResponse($psid, "I received an image but no valid link. Please resend it clearly.");
             }
-            break;
         }
     }
 }
